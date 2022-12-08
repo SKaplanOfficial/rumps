@@ -81,7 +81,7 @@ def alert(title=None, message='', ok=None, cancel=None, other=None, icon_path=No
         alert.window().setAppearance_(AppKit.NSAppearance.appearanceNamed_('NSAppearanceNameVibrantDark'))
     alert.setAlertStyle_(0)  # informational style
     if icon_path is not None:
-        icon = _nsimage_from_file(icon_path)
+        icon = _nsimage_from_file(icon_path, (20, 20))
         alert.setIcon_(icon)
     _log('alert opened with message: {0}, title: {1}'.format(repr(message), repr(title)))
     return alert.runModal()
@@ -125,7 +125,8 @@ def _nsimage_from_file(filename, dimensions=None, template=None):
             pass              # otherwise silently errors in NSImage which isn't helpful for debugging
     image = NSImage.alloc().initByReferencingFile_(filename)
     image.setScalesWhenResized_(True)
-    image.setSize_((20, 20) if dimensions is None else dimensions)
+    if dimensions is not None:
+        image.setSize_(dimensions)
     if not template is None:
         image.setTemplate_(template)
     return image
@@ -334,11 +335,16 @@ class Menu(ListDict):
         menu_width = max(menu._menu.size().width, 200)
         view = ele._menuitem.view()
         view_height = view.frame().size.height
-        view.setFrameSize_((menu_width, view_height))
 
         # Give the subview (e.g. slider) 5% padding on each side
         subview = view.subviews()[0]
-        subview.setFrame_(AppKit.NSMakeRect((menu_width - menu_width * 0.9) / 2, (view_height - view_height * 0.9) / 2, menu_width * 0.9, view_height * 0.9))
+        if isinstance(subview, AppKit.NSButton):
+            new_height = view_height * menu_width * 0.9 / subview.frame().size.width
+            view.setFrameSize_((menu_width, new_height))
+            subview.setFrame_(AppKit.NSMakeRect((menu_width - menu_width * 0.9) / 2, (new_height - new_height * 0.95) / 2, menu_width * 0.9, new_height * 0.95))
+        else:
+            view.setFrameSize_((menu_width, view_height))
+            subview.setFrame_(AppKit.NSMakeRect((menu_width - menu_width * 0.9) / 2, (view_height - view_height * 0.9) / 2, menu_width * 0.9, view_height * 0.9))
 
     def update(self, iterable, **kwargs):
         """Update with objects from `iterable` after each is converted to a :class:`rumps.MenuItem`, ignoring
@@ -386,7 +392,7 @@ class Menu(ListDict):
                 # menu item / could be visual separator where ele is None or separator
                 else:
                     menu.add(ele)
-                    if isinstance(ele, SliderMenuItem) or isinstance(ele, SegmentedMenuItem):
+                    if isinstance(ele, SliderMenuItem) or isinstance(ele, SegmentedMenuItem) or isinstance(ele, ImageMenuItem):
                         self._set_subview_dimensions(menu, ele)
         parse_menu(iterable, self, 0)
         parse_menu(kwargs, self, 0)
@@ -554,7 +560,7 @@ class MenuItem(Menu):
         self._template = template_mode
         self.set_icon(self.icon, template=template_mode)
 
-    def set_icon(self, icon_path, dimensions=None, template=None):
+    def set_icon(self, icon_path, dimensions=(20, 20), template=None):
         """Sets the icon displayed next to the text for this menu item. If set to ``None``, the current image (if any)
         is removed. Can optionally supply `dimensions`.
 
@@ -802,6 +808,95 @@ class SegmentedMenuItem(object):
                     self.__state[index] = True
 
 
+class ImageMenuItem(object):
+    """Represents an image menu item within the application's menu.
+
+    .. versionadded:: 0.5.0
+
+    :param image: the file path of the image to display in this menu item
+    :param tooltip: the tooltip text displayed when the cursor hovers over this menu item
+    :param callback: the function serving as callback for when a slide event occurs on this menu item.
+    """
+
+    def __init__(self, image_path, tooltip=None, callback=None):
+        self._view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 0, 30))
+        self._button = None
+        self.image = image_path
+
+        self._menuitem = NSMenuItem.alloc().init()
+        self._menuitem.setTarget_(NSApp)
+        self._menuitem.setView_(self._view)
+
+        if tooltip is not None:
+            self._menuitem.setToolTip_(tooltip)
+
+        self.set_callback(callback)
+
+    def __repr__(self):
+        return '<{0}: [image: {1}; callback: {2}]>'.format(
+            type(self).__name__,
+            self.image,
+            repr(self.callback)
+        )
+
+    def set_callback(self, callback):
+        """Set the function serving as callback for when a slide event occurs on this menu item.
+
+        :param callback: the function to be called when the user drags the marker on the slider.
+        """
+        NSApp._ns_to_py_and_callback[self._button] = self, callback
+        self._button.setAction_('callback:' if callback is not None else None)
+
+    @property
+    def callback(self):
+        return NSApp._ns_to_py_and_callback[self._button][1]
+
+    @property
+    def image(self):
+        """The path to the image that this menu item displays.
+
+        .. versionadded:: 0.5.0
+        """
+        return self._image
+
+    @image.setter
+    def image(self, image_path):
+        self._image = image_path
+        self.__image = _nsimage_from_file(image_path)
+
+        # Set view size proportional to the image's dimensions
+        self.__image.setSize_((150, self.__image.size()[1] *  150/self.__image.size()[0]))
+
+        # Apply rounded corners
+        rounded_img = AppKit.NSImage.alloc().initWithSize_(self.__image.size())
+        rounded_img.setScalesWhenResized_(True)
+        rounded_img.lockFocus()
+
+        context = AppKit.NSGraphicsContext.currentContext()
+        context.setImageInterpolation_(AppKit.NSImageInterpolationHigh)
+
+        image_frame = AppKit.NSMakeRect(0, 0, *self.__image.size())
+        clip_path = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(image_frame, 8, 8)
+        clip_path.setWindingRule_(AppKit.NSWindingRuleEvenOdd)
+        clip_path.addClip()
+
+        self.__image.drawAtPoint_fromRect_operation_fraction_(AppKit.NSZeroPoint, image_frame, AppKit.NSCompositingOperationSourceOver, 1)
+        rounded_img.unlockFocus()
+
+        # Display the rounded image in the menu item view
+        if self._button is None:
+            self._button = AppKit.NSButton.buttonWithImage_target_action_(rounded_img, NSApp, "callback:")
+            self._button.setBordered_(False)
+            self._button.setImageScaling_(AppKit.NSImageScaleAxesIndependently)
+        else:
+            self._view.setImage_(rounded_img)
+
+        self._button.setFrameSize_(self.__image.size())
+        self._view.setFrameSize_(self.__image.size())
+        self._view.setSubviews_([])
+        self._view.addSubview_(self._button)
+
+
 class SeparatorMenuItem(object):
     """Visual separator between :class:`rumps.MenuItem` objects in the application menu."""
     def __init__(self):
@@ -991,7 +1086,7 @@ class Window(object):
 
     @icon.setter
     def icon(self, icon_path):
-        new_icon = _nsimage_from_file(icon_path) if icon_path is not None else None
+        new_icon = _nsimage_from_file(icon_path, (20, 20)) if icon_path is not None else None
         self._icon = icon_path
         self._alert.setIcon_(new_icon)
 
